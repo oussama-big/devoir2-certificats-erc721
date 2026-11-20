@@ -6,15 +6,25 @@ export default defineConfig({
   solidity: {
     profiles: {
       default: {
-        version: "0.8.34",
-      },
-      production: {
-        version: "0.8.34",
+        version: "0.8.24",
         settings: {
+          evmVersion: "cancun",
           optimizer: {
             enabled: true,
             runs: 200,
           },
+          viaIR: true,
+        },
+      },
+      production: {
+        version: "0.8.24",
+        settings: {
+          evmVersion: "cancun",
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+          viaIR: true,
         },
       },
     },

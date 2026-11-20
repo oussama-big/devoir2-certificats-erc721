@@ -1,218 +1,470 @@
-import { useState } from "react";
-import { JsonRpcProvider, Wallet, Contract, keccak256, toUtf8Bytes } from "ethers";
-import CertificateArtifact from "./abi/CertificateERC721.json";
+import { useEffect, useMemo, useState } from "react";
+import { Contract, JsonRpcProvider, Wallet, getAddress, isAddress } from "ethers";
+import contractAbi from "./abi/CertificateERC721.json";
+import { ExcelCertificateImporter } from "./components/ExcelCertificateImporter";
 
 const RPC_URL = "http://127.0.0.1:8545";
-const CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3"; // Remplacer par ton adresse déployée
-const DEFAULT_ADMIN_ROLE = "0x0000000000000000000000000000000000000000000000000000000000000000";
-const MINTER_ROLE = keccak256(toUtf8Bytes("MINTER_ROLE"));
+const CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
+
+const LOCAL_ACCOUNTS = [
+  {
+    label: "Compte #0 — Admin (DEFAULT_ADMIN_ROLE)",
+    address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    privateKey:
+      "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+  },
+  {
+    label: "Compte #1 — Minter (MINTER_ROLE)",
+    address: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    privateKey:
+      "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+  },
+  {
+    label: "Compte #2 — Étudiant / Autre",
+    address: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    privateKey:
+      "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
+  },
+];
 
 interface CertificateView {
   tokenId: string;
+  studentName: string;
   studentId: string;
-  recipientName: string;
+  diplomaTitle: string;
+  issueDate: string;
+  grade: string;
+  recipient: string;
+  owner: string;
   issuedAt: string;
   revoked: boolean;
   tokenURI: string;
-  owner: string;
 }
 
 export default function App() {
-  const [privateKey, setPrivateKey] = useState<string>("");
-  const [account, setAccount] = useState<string>("");
-  const [isMinter, setIsMinter] = useState<boolean>(false);
-  const [isAdmin, setIsAdmin] = useState<boolean>(false);
-  const [status, setStatus] = useState<string>("");
-  const [errorMsg, setErrorMsg] = useState<string>("");
+  const provider = useMemo(() => new JsonRpcProvider(RPC_URL), []);
+  const [selectedAccountIdx, setSelectedAccountIdx] = useState<number>(1);
+  const [chainId, setChainId] = useState<string>("");
 
-  const [toAddress, setToAddress] = useState("");
-  const [studentId, setStudentId] = useState("");
-  const [recipientName, setRecipientName] = useState("");
-  const [tokenURI, setTokenURI] = useState("ipfs://QmCertificatLocal01");
+  const activeAccount = LOCAL_ACCOUNTS[selectedAccountIdx];
+  const signer = useMemo(
+    () => new Wallet(activeAccount.privateKey, provider),
+    [activeAccount, provider]
+  );
 
-  const [queryTokenId, setQueryTokenId] = useState("0");
-  const [certDetails, setCertDetails] = useState<CertificateView | null>(null);
+  const [recipientAddress, setRecipientAddress] = useState<string>(
+    "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+  );
+  const [studentName, setStudentName] = useState<string>("Oussama Bizg");
+  const [studentId, setStudentId] = useState<string>("IDIA-2026-001");
+  const [diplomaTitle, setDiplomaTitle] = useState<string>("Master IDIA");
+  const [issueDate, setIssueDate] = useState<string>("2026-11-20");
+  const [grade, setGrade] = useState<string>("Très Bien");
+  const [uri, setUri] = useState<string>("ipfs://QmCertificatIDIA2026001");
 
-  function parseContractError(err: any): string {
-    const raw = err?.reason || err?.shortMessage || err?.message || "Erreur inconnue";
-    if (raw.includes("AccessControlUnauthorizedAccount") || raw.includes("missing role")) {
-      return "Accès refusé : ce compte local ne possède pas le rôle requis (MINTER_ROLE ou DEFAULT_ADMIN_ROLE).";
-    }
-    if (raw.includes("Duplicate studentId")) {
-      return "Erreur métier : un certificat a déjà été émis pour ce studentId.";
-    }
-    if (raw.includes("Certificate does not exist")) {
-      return "Ce tokenId n'existe pas.";
-    }
-    if (raw.includes("Already revoked")) {
-      return "Ce certificat est déjà révoqué.";
-    }
-    return raw;
+  const [lookupId, setLookupId] = useState<string>("0");
+  const [certData, setCertData] = useState<CertificateView | null>(null);
+
+  const [statusMessage, setStatusMessage] = useState<string>("");
+  const [errorMessage, setErrorMessage] = useState<string>("");
+  const [loading, setLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    provider
+      .getNetwork()
+      .then((net) => setChainId(net.chainId.toString()))
+      .catch(() => setChainId("déconnecté"));
+  }, [provider]);
+
+  function clearFeedback() {
+    setStatusMessage("");
+    setErrorMessage("");
   }
 
-  function getProvider() {
-    return new JsonRpcProvider(RPC_URL);
-  }
-
-  function getSigner() {
-    if (!privateKey.trim()) {
-      throw new Error("Entre une clé privée d'un compte Hardhat local.");
-    }
-    return new Wallet(privateKey.trim(), getProvider());
-  }
-
-  async function loadLocalAccount() {
-    setErrorMsg("");
-    setStatus("");
-    try {
-      const signer = getSigner();
-      const addr = await signer.getAddress();
-      setAccount(addr);
-
-      const contract = new Contract(CONTRACT_ADDRESS, CertificateArtifact.abi, getProvider());
-      setIsMinter(await contract.hasRole(MINTER_ROLE, addr));
-      setIsAdmin(await contract.hasRole(DEFAULT_ADMIN_ROLE, addr));
-      setStatus(`Compte local actif : ${addr}`);
-    } catch (err) {
-      setErrorMsg(parseContractError(err));
-    }
-  }
-
-  async function handleMint(e: React.FormEvent) {
+  async function handleSingleMint(e: React.FormEvent) {
     e.preventDefault();
-    setErrorMsg("");
-    setStatus("Transaction de mint en cours sur le nœud local...");
+    clearFeedback();
     try {
-      const signer = getSigner();
-      const contract = new Contract(CONTRACT_ADDRESS, CertificateArtifact.abi, signer);
-      const tx = await contract.mintCertificate(toAddress, studentId, recipientName, tokenURI);
+      const targetAddr = recipientAddress.trim() || activeAccount.address;
+      if (!isAddress(targetAddr)) {
+        throw new Error("Adresse destinataire invalide.");
+      }
+      if (
+        !studentName.trim() ||
+        !studentId.trim() ||
+        !diplomaTitle.trim() ||
+        !issueDate.trim() ||
+        !uri.trim()
+      ) {
+        throw new Error("Veuillez remplir tous les champs obligatoires.");
+      }
+
+      setLoading(true);
+      const contract = new Contract(CONTRACT_ADDRESS, contractAbi, signer);
+      const tx = await contract.mintCertificate(
+        getAddress(targetAddr),
+        studentName.trim(),
+        studentId.trim(),
+        diplomaTitle.trim(),
+        issueDate.trim(),
+        grade.trim(),
+        uri.trim()
+      );
       const receipt = await tx.wait();
 
-      let mintedId = "?";
-      for (const log of receipt.logs) {
+      let mintedTokenId = "";
+      for (const log of receipt?.logs ?? []) {
         try {
           const parsed = contract.interface.parseLog(log);
           if (parsed?.name === "CertificateMinted") {
-            mintedId = parsed.args.tokenId.toString();
+            mintedTokenId = parsed.args.tokenId.toString();
+            break;
           }
         } catch {
           // Ignorer les autres logs
         }
       }
 
-      setStatus(`Certificat émis ! tokenId = ${mintedId} | tokenURI = ${tokenURI}`);
-      setQueryTokenId(mintedId);
-    } catch (err) {
-      setStatus("");
-      setErrorMsg(parseContractError(err));
+      setStatusMessage(
+        `Certificat émis${mintedTokenId ? ` (ID #${mintedTokenId})` : ""} — Tx : ${
+          receipt?.hash ?? tx.hash
+        }`
+      );
+      if (mintedTokenId) {
+        setLookupId(mintedTokenId);
+      }
+    } catch (err: any) {
+      setErrorMessage(
+        err?.reason || err?.shortMessage || err?.message || "Erreur lors du mint."
+      );
+    } finally {
+      setLoading(false);
     }
   }
 
-  async function handleFetchCertificate() {
-    setErrorMsg("");
+  async function handleLookupCertificate(e?: React.FormEvent) {
+    if (e) e.preventDefault();
+    clearFeedback();
     try {
-      const contract = new Contract(CONTRACT_ADDRESS, CertificateArtifact.abi, getProvider());
-      const id = BigInt(queryTokenId);
-      const [sId, rName, issuedAt, revoked, uri] = await contract.getCertificate(id);
-      const owner = await contract.ownerOf(id);
+      const idTrimmed = lookupId.trim();
+      if (
+        idTrimmed === "" ||
+        Number.isNaN(Number(idTrimmed)) ||
+        Number(idTrimmed) < 0
+      ) {
+        throw new Error(
+          "Veuillez saisir un identifiant de certificat valide (ex. 0, 1, 2...)."
+        );
+      }
 
-      setCertDetails({
-        tokenId: queryTokenId,
-        studentId: sId,
-        recipientName: rName,
-        issuedAt: new Date(Number(issuedAt) * 1000).toLocaleString(),
-        revoked,
-        tokenURI: uri,
-        owner,
+      setLoading(true);
+      const readContract = new Contract(CONTRACT_ADDRESS, contractAbi, provider);
+      const tokenIdBig = BigInt(idTrimmed);
+
+      const [cert, currentOwner, currentUri] = await Promise.all([
+        readContract.getCertificate(tokenIdBig),
+        readContract.ownerOf(tokenIdBig),
+        readContract.tokenURI(tokenIdBig),
+      ]);
+
+      const timestampSec = Number(cert.issuedAt ?? 0);
+      const formattedDate =
+        timestampSec > 0 ? new Date(timestampSec * 1000).toLocaleString("fr-FR") : "—";
+
+      setCertData({
+        tokenId: tokenIdBig.toString(),
+        studentName: cert.studentName,
+        studentId: cert.studentId,
+        diplomaTitle: cert.diplomaTitle,
+        issueDate: cert.issueDate,
+        grade: cert.grade,
+        recipient: cert.recipient,
+        owner: currentOwner,
+        issuedAt: formattedDate,
+        revoked: Boolean(cert.revoked),
+        tokenURI: currentUri,
       });
-    } catch (err) {
-      setCertDetails(null);
-      setErrorMsg(parseContractError(err));
+      setStatusMessage(`Certificat #${tokenIdBig.toString()} chargé.`);
+    } catch (err: any) {
+      setCertData(null);
+      setErrorMessage(
+        err?.reason || err?.shortMessage || err?.message || "Certificat introuvable."
+      );
+    } finally {
+      setLoading(false);
     }
   }
 
-  async function handleRevoke() {
-    setErrorMsg("");
-    setStatus("Révocation en cours sur le nœud local...");
+  async function handleRevokeCertificate(tokenIdStr: string) {
+    clearFeedback();
     try {
-      const signer = getSigner();
-      const contract = new Contract(CONTRACT_ADDRESS, CertificateArtifact.abi, signer);
-      const tx = await contract.revokeCertificate(BigInt(queryTokenId));
-      await tx.wait();
-      setStatus(`Certificat #${queryTokenId} révoqué.`);
-      await handleFetchCertificate();
-    } catch (err) {
-      setStatus("");
-      setErrorMsg(parseContractError(err));
+      setLoading(true);
+      const contract = new Contract(CONTRACT_ADDRESS, contractAbi, signer);
+      const tx = await contract.revoke(BigInt(tokenIdStr));
+      const receipt = await tx.wait();
+
+      setStatusMessage(
+        `Certificat #${tokenIdStr} révoqué — Tx : ${receipt?.hash ?? tx.hash}`
+      );
+      await handleLookupCertificate();
+    } catch (err: any) {
+      setErrorMessage(
+        err?.reason ||
+          err?.shortMessage ||
+          err?.message ||
+          "Révocation refusée (vérifiez DEFAULT_ADMIN_ROLE)."
+      );
+    } finally {
+      setLoading(false);
     }
   }
 
   return (
-    <div style={{ maxWidth: 760, margin: "2rem auto", fontFamily: "sans-serif", padding: "0 1rem" }}>
-      <h1>Gestion des Certificats ERC-721 (100 % Local - Sans MetaMask)</h1>
+    <main
+      style={{
+        maxWidth: 960,
+        margin: "2rem auto",
+        padding: "0 1rem",
+        fontFamily: "sans-serif",
+      }}
+    >
+      <h1>Plateforme de Certification Académique (ERC-721)</h1>
+      <p>
+        <strong>Réseau :</strong> {RPC_URL} (Chain ID : <code>{chainId || "..."}</code>) |{" "}
+        <strong>Contrat :</strong> <code>{CONTRACT_ADDRESS}</code>
+      </p>
 
-      <div style={{ padding: "1rem", border: "1px solid #ccc", borderRadius: 8, marginBottom: "1.5rem" }}>
-        <label style={{ display: "block", marginBottom: "0.5rem" }}>
-          Clé privée locale (depuis <code>npx hardhat node</code>) :
-        </label>
-        <div style={{ display: "flex", gap: "0.5rem" }}>
+      <section
+        style={{
+          border: "1px solid #ddd",
+          padding: "1rem",
+          borderRadius: 8,
+          marginBottom: "1.5rem",
+        }}
+      >
+        <h2>1. Compte Local Actif</h2>
+        <select
+          value={selectedAccountIdx}
+          onChange={(e) => setSelectedAccountIdx(Number(e.target.value))}
+          style={{ padding: "0.4rem", minWidth: 320 }}
+        >
+          {LOCAL_ACCOUNTS.map((acc, idx) => (
+            <option key={acc.address} value={idx}>
+              {acc.label}
+            </option>
+          ))}
+        </select>
+        <p style={{ marginTop: "0.5rem" }}>
+          Adresse active : <code>{activeAccount.address}</code>
+        </p>
+      </section>
+
+      {statusMessage && (
+        <div
+          style={{
+            padding: "0.75rem",
+            background: "#ecfdf5",
+            color: "#065f46",
+            borderRadius: 6,
+            marginBottom: "1rem",
+          }}
+        >
+          {statusMessage}
+        </div>
+      )}
+      {errorMessage && (
+        <div
+          style={{
+            padding: "0.75rem",
+            background: "#fef2f2",
+            color: "#991b1b",
+            borderRadius: 6,
+            marginBottom: "1rem",
+          }}
+        >
+          {errorMessage}
+        </div>
+      )}
+
+      <section
+        style={{
+          border: "1px solid #ddd",
+          padding: "1rem",
+          borderRadius: 8,
+          marginBottom: "1.5rem",
+        }}
+      >
+        <h2>2. Émission Unitaire (MINTER_ROLE)</h2>
+        <form
+          onSubmit={handleSingleMint}
+          style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}
+        >
+          <label>
+            Nom complet (studentName)
+            <input
+              type="text"
+              value={studentName}
+              onChange={(e) => setStudentName(e.target.value)}
+              style={{ width: "100%", padding: "0.35rem" }}
+            />
+          </label>
+          <label>
+            Identifiant étudiant / CNE (studentId)
+            <input
+              type="text"
+              value={studentId}
+              onChange={(e) => setStudentId(e.target.value)}
+              style={{ width: "100%", padding: "0.35rem" }}
+            />
+          </label>
+          <label>
+            Intitulé du diplôme (diplomaTitle)
+            <input
+              type="text"
+              value={diplomaTitle}
+              onChange={(e) => setDiplomaTitle(e.target.value)}
+              style={{ width: "100%", padding: "0.35rem" }}
+            />
+          </label>
+          <label>
+            Date d'émission (issueDate)
+            <input
+              type="text"
+              value={issueDate}
+              onChange={(e) => setIssueDate(e.target.value)}
+              style={{ width: "100%", padding: "0.35rem" }}
+            />
+          </label>
+          <label>
+            Mention / note (grade)
+            <input
+              type="text"
+              value={grade}
+              onChange={(e) => setGrade(e.target.value)}
+              style={{ width: "100%", padding: "0.35rem" }}
+            />
+          </label>
+          <label>
+            Adresse destinataire (recipientAddress)
+            <input
+              type="text"
+              value={recipientAddress}
+              onChange={(e) => setRecipientAddress(e.target.value)}
+              style={{ width: "100%", padding: "0.35rem" }}
+            />
+          </label>
+          <label style={{ gridColumn: "1 / -1" }}>
+            URI des métadonnées (tokenURI)
+            <input
+              type="text"
+              value={uri}
+              onChange={(e) => setUri(e.target.value)}
+              style={{ width: "100%", padding: "0.35rem" }}
+            />
+          </label>
+          <div style={{ gridColumn: "1 / -1" }}>
+            <button type="submit" disabled={loading} style={{ padding: "0.5rem 1rem" }}>
+              {loading ? "Traitement..." : "Émettre le certificat"}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section
+        style={{
+          border: "1px solid #ddd",
+          padding: "1rem",
+          borderRadius: 8,
+          marginBottom: "1.5rem",
+        }}
+      >
+        <h2>3. Import Excel / CSV & Émission par Lot</h2>
+        <ExcelCertificateImporter
+          signer={signer}
+          contractAddress={CONTRACT_ADDRESS}
+          abi={contractAbi}
+          defaultRecipient={activeAccount.address}
+        />
+      </section>
+
+      <section style={{ border: "1px solid #ddd", padding: "1rem", borderRadius: 8 }}>
+        <h2>4. Consultation Publique & Révocation</h2>
+        <form
+          onSubmit={handleLookupCertificate}
+          style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}
+        >
           <input
-            type="password"
-            placeholder="0x..."
-            value={privateKey}
-            onChange={(e) => setPrivateKey(e.target.value)}
-            style={{ flex: 1 }}
+            type="number"
+            min={0}
+            value={lookupId}
+            onChange={(e) => setLookupId(e.target.value)}
+            placeholder="ID du certificat (ex. 0)"
+            style={{ padding: "0.4rem", width: 200 }}
           />
-          <button type="button" onClick={loadLocalAccount}>Charger le compte</button>
-        </div>
-
-        {account && (
-          <div style={{ marginTop: "0.75rem" }}>
-            <p><strong>Adresse :</strong> {account}</p>
-            <p>
-              <strong>Rôles :</strong>{" "}
-              {isAdmin ? "DEFAULT_ADMIN_ROLE " : ""}
-              {isMinter ? "MINTER_ROLE " : ""}
-              {!isAdmin && !isMinter ? "Aucun rôle privilégié" : ""}
-            </p>
-          </div>
-        )}
-      </div>
-
-      {status && <div style={{ padding: "0.75rem", background: "#e6ffed", border: "1px solid #34d058", marginBottom: "1rem" }}>{status}</div>}
-      {errorMsg && <div style={{ padding: "0.75rem", background: "#ffeef0", border: "1px solid #d73a49", marginBottom: "1rem" }}>{errorMsg}</div>}
-
-      <form onSubmit={handleMint} style={{ display: "grid", gap: "0.75rem", padding: "1rem", border: "1px solid #ccc", borderRadius: 8, marginBottom: "1.5rem" }}>
-        <h2>Émettre un certificat (mintCertificate)</h2>
-        <input placeholder="Adresse étudiant (0x...)" value={toAddress} onChange={(e) => setToAddress(e.target.value)} required />
-        <input placeholder="Student ID (ex: STU-2026-001)" value={studentId} onChange={(e) => setStudentId(e.target.value)} required />
-        <input placeholder="Nom complet de l'étudiant" value={recipientName} onChange={(e) => setRecipientName(e.target.value)} required />
-        <input placeholder="Token URI (ex: ipfs://...)" value={tokenURI} onChange={(e) => setTokenURI(e.target.value)} required />
-        <button type="submit">Minter le certificat NFT</button>
-      </form>
-
-      <div style={{ padding: "1rem", border: "1px solid #ccc", borderRadius: 8 }}>
-        <h2>Consulter ou Révoquer un certificat</h2>
-        <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
-          <input type="number" min="0" value={queryTokenId} onChange={(e) => setQueryTokenId(e.target.value)} />
-          <button type="button" onClick={handleFetchCertificate}>Consulter (getCertificate)</button>
-          <button type="button" onClick={handleRevoke} style={{ background: "#d73a49", color: "white", border: "none", padding: "0.4rem 0.8rem" }}>
-            Révoquer (Admin)
+          <button type="submit" disabled={loading} style={{ padding: "0.4rem 0.9rem" }}>
+            Rechercher
           </button>
-        </div>
+        </form>
 
-        {certDetails && (
-          <div style={{ background: "#f6f8fa", padding: "1rem", borderRadius: 6 }}>
-            <p><strong>tokenId :</strong> {certDetails.tokenId}</p>
-            <p><strong>tokenURI :</strong> {certDetails.tokenURI}</p>
-            <p><strong>Propriétaire (ownerOf) :</strong> {certDetails.owner}</p>
-            <p><strong>Student ID :</strong> {certDetails.studentId}</p>
-            <p><strong>Étudiant :</strong> {certDetails.recipientName}</p>
-            <p><strong>Date d'émission :</strong> {certDetails.issuedAt}</p>
-            <p><strong>Statut :</strong> {certDetails.revoked ? "RÉVOQUÉ" : "VALIDE"}</p>
+        {certData && (
+          <div
+            style={{
+              background: "#f9fafb",
+              padding: "1rem",
+              borderRadius: 6,
+              border: "1px solid #e5e7eb",
+            }}
+          >
+            <p>
+              <strong>Certificat #{certData.tokenId}</strong> — Statut :{" "}
+              <strong style={{ color: certData.revoked ? "#b91c1c" : "#15803d" }}>
+                {certData.revoked ? "RÉVOQUÉ" : "VALIDE"}
+              </strong>
+            </p>
+            <ul style={{ lineHeight: 1.7 }}>
+              <li>
+                <strong>Étudiant :</strong> {certData.studentName} ({certData.studentId})
+              </li>
+              <li>
+                <strong>Diplôme :</strong> {certData.diplomaTitle}
+              </li>
+              <li>
+                <strong>Date d'émission :</strong> {certData.issueDate} (Bloc horodaté :{" "}
+                {certData.issuedAt})
+              </li>
+              <li>
+                <strong>Mention :</strong> {certData.grade || "—"}
+              </li>
+              <li>
+                <strong>Destinataire initial :</strong> <code>{certData.recipient}</code>
+              </li>
+              <li>
+                <strong>Propriétaire actuel :</strong> <code>{certData.owner}</code>
+              </li>
+              <li>
+                <strong>URI :</strong> <code>{certData.tokenURI}</code>
+              </li>
+            </ul>
+
+            {!certData.revoked && (
+              <button
+                type="button"
+                onClick={() => handleRevokeCertificate(certData.tokenId)}
+                disabled={loading}
+                style={{
+                  padding: "0.45rem 0.9rem",
+                  background: "#fee2e2",
+                  color: "#991b1b",
+                  border: "1px solid #fca5a5",
+                  borderRadius: 4,
+                }}
+              >
+                Révoquer ce certificat (DEFAULT_ADMIN_ROLE)
+              </button>
+            )}
           </div>
         )}
-      </div>
-    </div>
+      </section>
+    </main>
   );
 }
